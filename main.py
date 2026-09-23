@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import re  # ➕ ДОБАВЛЕНО: для валидации имени таблицы
 from contextlib import contextmanager, asynccontextmanager
 
 import mysql.connector
@@ -13,18 +14,24 @@ db_host = os.environ.get('DB_HOST', '127.0.0.1')
 db_user = os.environ.get('DB_USER', 'app')
 db_password = os.environ.get('DB_PASSWORD', 'very_strong')
 db_name = os.environ.get('DB_NAME', 'example')
+db_table = os.environ.get('DB_TABLE', 'requests')  # ➕ ДОБАВЛЕНО: имя таблицы из ENV
+
+# ➕ ДОБАВЛЕНО: валидация — защита от SQL-инъекции через имя таблицы
+if not re.fullmatch(r'[A-Za-z0-9_]+', db_table):
+    raise ValueError(f"Недопустимое имя таблицы: {db_table}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Код, который выполнится перед запуском приложения
     print("Приложение запускается...")
     if ensure_table_exists():
-        print("Соединение с БД установлено и таблица 'requests' готова к работе.")
+        print(f"Соединение с БД установлено и таблица '{db_table}' готова к работе.")  # 🔄 ИЗМЕНЕНО: было 'requests'
     else:
         print("БД недоступна при старте. Таблица будет создана при первом запросе.")
-    
+
     yield
-    
+
     # Код, который выполнится при остановке приложения
     print("Приложение останавливается.")
 
@@ -57,12 +64,14 @@ def get_db_connection():
 
 # --- 2.1. Функция создания таблицы ---
 def ensure_table_exists():
-    """Создает таблицу requests если она не существует"""
+    """Создает таблицу если она не существует"""
     try:
         with get_db_connection() as db:
             cursor = db.cursor()
+            # 🔄 ИЗМЕНЕНО: убран префикс {db_name}., имя таблицы берётся из db_table
+            # 🔄 ИЗМЕНЕНО: имя таблицы в обратных кавычках для безопасности
             create_table_query = f"""
-            CREATE TABLE IF NOT EXISTS {db_name}.requests (
+            CREATE TABLE IF NOT EXISTS `{db_table}` (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 request_date DATETIME,
                 request_ip VARCHAR(255)
@@ -82,6 +91,28 @@ def get_client_ip(x_real_ip: Optional[str] = Header(None)):
     return x_real_ip
 
 
+# --- 4. Вспомогательная функция для INSERT ---
+# ➕ ДОБАВЛЕНО: вынесено из эндпоинта /, чтобы убрать дублирование try/except
+def _insert_request(current_time: str, ip: Optional[str]) -> None:
+    """Вставляет запись в таблицу. При ошибке — пересоздаёт таблицу и повторяет."""
+    query = f"INSERT INTO `{db_table}` (request_date, request_ip) VALUES (%s, %s)"  # 🔄 ИЗМЕНЕНО: db_table вместо requests
+    values = (current_time, ip)
+    try:
+        with get_db_connection() as db:
+            cursor = db.cursor()
+            cursor.execute(query, values)
+            db.commit()
+            cursor.close()
+    except mysql.connector.Error as err:
+        print(f"Ошибка INSERT: {err}. Пересоздаю таблицу.")
+        ensure_table_exists()
+        with get_db_connection() as db:
+            cursor = db.cursor()
+            cursor.execute(query, values)
+            db.commit()
+            cursor.close()
+
+
 # --- 5. Основной эндпоинт ---
 @app.get("/")
 def index(request: Request, ip_address: Optional[str] = Depends(get_client_ip)):
@@ -90,23 +121,8 @@ def index(request: Request, ip_address: Optional[str] = Depends(get_client_ip)):
     now = datetime.now()
     current_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
-    try:
-        with get_db_connection() as db:
-            cursor = db.cursor()
-            query = "INSERT INTO requests (request_date, request_ip) VALUES (%s, %s)"
-            values = (current_time, final_ip)
-            cursor.execute(query, values)
-            db.commit()
-            cursor.close()
-    except mysql.connector.Error as err:
-        ensure_table_exists()
-        with get_db_connection() as db:
-            cursor = db.cursor()
-            query = "INSERT INTO requests (request_date, request_ip) VALUES (%s, %s)"
-            values = (current_time, final_ip)
-            cursor.execute(query, values)
-            db.commit()
-            cursor.close()
+    # 🔄 ИЗМЕНЕНО: вместо дублированного try/except — вызов вспомогательной функции
+    _insert_request(current_time, final_ip)
 
     # Подсказка для студентов при неправильном обращении
     if final_ip is None:
@@ -130,53 +146,41 @@ def debug_headers(request: Request):
     }
 
 
-# --- 6. Эндпоинт для просмотра записей в БД ---
+# --- 6. Вспомогательная функция для SELECT ---
+# ➕ ДОБАВЛЕНО: вынесено из эндпоинта /requests, чтобы убрать дублирование try/except
+def _fetch_requests() -> list:
+    query = (f"SELECT id, request_date, request_ip FROM `{db_table}` "  # 🔄 ИЗМЕНЕНО: db_table вместо requests
+             f"ORDER BY id DESC LIMIT 50")
+    with get_db_connection() as db:
+        cursor = db.cursor()
+        cursor.execute(query)
+        records = cursor.fetchall()
+        cursor.close()
+        return [
+            {
+                "id": r[0],
+                "request_date": r[1].strftime("%Y-%m-%d %H:%M:%S") if r[1] else None,
+                "request_ip": r[2],
+            }
+            for r in records
+        ]
+
+
+# --- 6.1. Эндпоинт для просмотра записей в БД ---
 @app.get("/requests")
 def get_requests():
-    """Возвращает все записи из таблицы requests для проверки"""
+    """Возвращает все записи из таблицы для проверки"""
     try:
-        with get_db_connection() as db:
-            cursor = db.cursor()
-            query = "SELECT id, request_date, request_ip FROM requests ORDER BY id DESC LIMIT 50"
-            cursor.execute(query)
-            records = cursor.fetchall()
-            cursor.close()
-            
-            # Преобразуем записи в читабельный формат
-            result = []
-            for record in records:
-                result.append({
-                    "id": record[0],
-                    "request_date": record[1].strftime("%Y-%m-%d %H:%M:%S") if record[1] else None,
-                    "request_ip": record[2]
-                })
-            
-            return {
-                "total_records": len(result),
-                "records": result
-            }
+        result = _fetch_requests()  # 🔄 ИЗМЕНЕНО: вызов вспомогательной функции
     except mysql.connector.Error as err:
+        print(f"Ошибка SELECT: {err}. Пересоздаю таблицу.")
         ensure_table_exists()
-        with get_db_connection() as db:
-            cursor = db.cursor()
-            query = "SELECT id, request_date, request_ip FROM requests ORDER BY id DESC LIMIT 50"
-            cursor.execute(query)
-            records = cursor.fetchall()
-            cursor.close()
-            
-            # Преобразуем записи в читабельный формат
-            result = []
-            for record in records:
-                result.append({
-                    "id": record[0],
-                    "request_date": record[1].strftime("%Y-%m-%d %H:%M:%S") if record[1] else None,
-                    "request_ip": record[2]
-                })
-            
-            return {
-                "total_records": len(result),
-                "records": result
-            }
+        result = _fetch_requests()
+
+    return {
+        "total_records": len(result),
+        "records": result,
+    }
 
 
 # --- 7. Запуск приложения ---

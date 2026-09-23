@@ -1,0 +1,37 @@
+name: myapp
+
+include:
+  - ./proxy.yaml
+
+services:
+  web:
+    image: cr.yandex/crpt75mlr0lmfrrgeng0/myapp:1.1.0
+    #Если необходима локальная сборка
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile.python
+    container_name: web
+    restart: unless-stopped
+    networks:
+      backend:
+        ipv4_address: 172.20.0.5
+    environment:
+      DB_HOST: db
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE}
+      DB_TABLE: ${DB_TABLE:-requests}
+    depends_on:
+      - db
+  db:
+    image: mysql:8
+    restart: unless-stopped
+    container_name: mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    networks:
+      backend:
+        ipv4_address: 172.20.0.10

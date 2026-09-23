@@ -1,0 +1,42 @@
+ARG VERSION=3.12
+FROM python:${VERSION}-slim AS builder
+# Set work directory
+WORKDIR /app
+# Copy requirements.txt for install requirements
+COPY requirements.txt .
+# Create venv in /app
+RUN python -m venv /app/venv
+# Set PATH
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH="/app/venv/bin:$PATH"
+# Install all requirements and create cache
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+FROM builder AS runtime
+# Set work directory
+WORKDIR /app
+# Create system group, user and grant privileges on dir /app
+RUN addgroup --system python && \
+    adduser --system --disabled-password --ingroup python python && \
+    chown python:python /app
+# Change user
+USER python
+# Copy packages from builder
+COPY --chown=python:python --from=builder /app/venv ./venv
+# Copy files from project directory
+COPY --chown=python:python . .
+# Set PATH
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH" \
+    DB_HOST="" \
+    DB_USER="" \
+    DB_PASSWORD="" \
+    DB_NAME="" \
+    DB_TABLE=""
+
+    # Launch the application using uvicorn, making it accessible over the network
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"] 
