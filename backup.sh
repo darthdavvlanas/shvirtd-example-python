@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Загружаем секреты из внешнего файла ---
-SECRET_FILE="/opt/.backup_secrets"
+SECRET_FILE="./.backup_secrets"
 if [[ ! -f "${SECRET_FILE}" ]]; then
     echo "[!] Файл секретов ${SECRET_FILE} не найден" >&2
     exit 1
